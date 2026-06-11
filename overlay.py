@@ -24,13 +24,12 @@ import logging
 from pathlib import Path
 
 from PyQt6.QtWidgets import QWidget, QApplication, QGraphicsView
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QRectF, QPointF, QDateTime, QElapsedTimer
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QRectF, QPointF, QDateTime, QElapsedTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPixmap, QImage,
     QPainterPath, QRadialGradient, QLinearGradient, QFont, QFontDatabase,
 )
-from PyQt6.QtMultimedia import QMediaPlayer
-from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
+from PyQt6.QtMultimedia import QMediaPlayer, QVideoSink, QVideoFrame
 from PyQt6.QtWidgets import QGraphicsScene
 
 log = logging.getLogger("RainDelay.overlay")
@@ -68,6 +67,16 @@ class _CustomGraphicsView(QGraphicsView):
         if darkness > 0:
             dark_alpha = int(darkness * 2.55)
             painter.fillRect(rect, QColor(0, 0, 0, dark_alpha))
+
+        # Composite the latest video frame using Screen blend mode:
+        # Screen makes black pixels fully transparent, so only the rain/water
+        # is visible over the blurred desktop background.
+        px = overlay._current_video_pixmap
+        if px and not px.isNull():
+            scene_rect = self.scene().sceneRect()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.drawPixmap(scene_rect.toRect(), px)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
     
     def drawForeground(self, painter, rect):
         """Paint the text overlay on top of the video."""
@@ -144,9 +153,12 @@ class RainOverlay(QWidget):
         self._target_screen = target_screen  # QScreen or None for primary
         self._bg_pixmap = None
         self._use_video = False
-        self._video_item = None  # QGraphicsVideoItem for GPU-accelerated rendering
+        self._video_sink = None       # QVideoSink for receiving decoded frames
+        self._current_video_pixmap = None  # Latest frame as QPixmap for Screen blend compositing
+        self._scene_size = None  # (w, h) of graphics scene for frame pre-scaling
         self._graphics_view = None  # QGraphicsView to display the video
         self._media_player = None  # QMediaPlayer for this overlay
+        self._fade_anim = None    # QPropertyAnimation for fade-in
         self._show_text = False
         self._countdown_remaining_ms = 0  # set externally by main.py
         self._timer = QTimer(self)
@@ -212,9 +224,22 @@ class RainOverlay(QWidget):
         else:
             log.warning("  No video file found in assets/ — rain video required")
 
+        self.setWindowOpacity(0.0)
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
+
+        # Fade in from transparent to fully opaque over 500ms
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_anim.setDuration(500)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Clear our reference when the animation finishes so deactivate() doesn't
+        # try to call .stop() on an already-deleted C++ object.
+        self._fade_anim.finished.connect(lambda: setattr(self, '_fade_anim', None))
+        self._fade_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
         self._reset_perf_counters()
         if self._use_video:
             self._log_video_diagnostics()
@@ -223,21 +248,28 @@ class RainOverlay(QWidget):
                  (time.perf_counter() - t_start) * 1000)
 
     def deactivate(self):
+        # Stop fade-in animation if still running
+        if self._fade_anim:
+            self._fade_anim.stop()
+            self._fade_anim = None
         self._timer.stop()
         if self._media_player:
             self._media_player.stop()
             self._media_player.setSource(QUrl())
             self._media_player = None
-        # Clean up graphics view (which will clean up the video item automatically)
+        if self._video_sink:
+            self._video_sink = None
+        self._current_video_pixmap = None
+        self._scene_size = None
+        # Clean up graphics view
         if self._graphics_view:
             self._graphics_view.hide()
             self._graphics_view.deleteLater()
             self._graphics_view = None
-        # Video item is owned by the scene, don't delete it separately
-        self._video_item = None
         self._bg_pixmap = None
         self._use_video = False
         self._reset_perf_counters()
+        self.setWindowOpacity(1.0)
         self.hide()
 
     def update_settings(self, settings: dict):
@@ -252,21 +284,21 @@ class RainOverlay(QWidget):
     # ================================================================== #
 
     def _setup_video_widget(self, video_path: str, w: int, h: int):
-        """Set up QGraphicsVideoItem for GPU-accelerated video rendering with screen blend."""
+        """Set up QVideoSink for frame-by-frame compositing with Screen blend mode."""
         # Create media player
         self._media_player = QMediaPlayer(self)
-        
-        # Create graphics scene — drawBackground in _CustomGraphicsView paints the bg pixmap
+
+        # QVideoSink receives decoded frames; _on_video_frame composites them
+        # over the blurred background using QPainter Screen blend mode.
+        self._video_sink = QVideoSink(self)
+        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
+        self._media_player.setVideoOutput(self._video_sink)
+
+        # Create graphics scene — drawBackground paints bg + composited video frame
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, w, h)
-        
-        # Video item — IgnoreAspectRatio so it fills the full screen (no letterbox bars)
-        self._video_item = QGraphicsVideoItem()
-        self._video_item.setSize(QRectF(0, 0, w, h).size())
-        self._video_item.setPos(0, 0)
-        self._video_item.setAspectRatioMode(Qt.AspectRatioMode.IgnoreAspectRatio)
-        scene.addItem(self._video_item)
-        
+        self._scene_size = (w, h)  # used to pre-scale frames in _on_video_frame
+
         # Create custom graphics view as child of this overlay
         self._graphics_view = _CustomGraphicsView(scene, self, self)
         self._graphics_view.setGeometry(0, 0, w, h)
@@ -276,17 +308,6 @@ class RainOverlay(QWidget):
         self._graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._graphics_view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._graphics_view.setSceneRect(0, 0, w, h)
-        
-        # Enable OpenGL rendering for better performance (optional)
-        try:
-            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-            self._graphics_view.setViewport(QOpenGLWidget())
-            log.info("  [PERF] OpenGL viewport enabled for hardware acceleration")
-        except:
-            log.info("  [PERF] Using default viewport (OpenGL not available)")
-        
-        # Connect player to video item
-        self._media_player.setVideoOutput(self._video_item)
         
         # Set source and loop infinitely
         self._media_player.setSource(QUrl.fromLocalFile(video_path))
@@ -321,7 +342,7 @@ class RainOverlay(QWidget):
                 except:
                     log.info("[DIAG] GPU: Detection failed")
             
-            log.info("[DIAG] Using QGraphicsVideoItem for direct GPU rendering (no CPU conversion)")
+            log.info("[DIAG] Using QVideoSink + Screen blend mode (rain composited over blurred desktop)")
             log.info("[DIAG] =========================================")
         except Exception as e:
             log.debug("[DIAG] System info failed: %s", e)
@@ -335,7 +356,28 @@ class RainOverlay(QWidget):
         self._graphics_view.show()
         self._graphics_view.raise_()
         self._media_player.play()
-        log.info("  [PERF] Starting GPU-accelerated video playback from: %s", video_path)
+        log.info("  [PERF] Starting video playback with Screen blend compositing from: %s", video_path)
+
+    def _on_video_frame(self, frame: QVideoFrame):
+        """Receive a decoded video frame, convert to QPixmap (GPU-resident), trigger repaint."""
+        if not frame.isValid():
+            return
+        img = frame.toImage()
+        if img.isNull():
+            return
+        # Convert to ARGB32_Premultiplied once on CPU, then upload to GPU as QPixmap.
+        # QPixmap is GPU-resident so drawPixmap in paint is hardware-accelerated.
+        # Pre-scale to scene size so drawPixmap does no scaling at paint time.
+        img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        if self._scene_size:
+            w, h = self._scene_size
+            if img.width() != w or img.height() != h:
+                img = img.scaled(w, h,
+                                 Qt.AspectRatioMode.IgnoreAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+        self._current_video_pixmap = QPixmap.fromImage(img)
+        if self._graphics_view:
+            self._graphics_view.viewport().update()
 
     # ================================================================== #
     #  Blur
@@ -390,9 +432,9 @@ class RainOverlay(QWidget):
         log.info("[DIAG] Display: %dx%d @ %.2f DPI scale", 
                  self.width(), self.height(), 
                  self.screen().devicePixelRatio() if self.screen() else 1.0)
-        log.info("[DIAG] Rendering: QGraphicsVideoItem (GPU-accelerated, no CPU conversion)")
-        log.info("[DIAG] Target: 30fps native video playback")
-        log.info("[DIAG] Note: Video is rendered directly by GPU, bypassing slow CPU NV12→RGB conversion")
+        log.info("[DIAG] Rendering: QVideoSink + Screen blend (rain composited over blurred desktop)")
+        log.info("[DIAG] Target: 30fps video playback with CPU compositing")
+        log.info("[DIAG] Note: Frames decoded and composited with Screen blend so black pixels are transparent")
         log.info("[DIAG] =========================================")
         log.info("[PERF] Performance monitoring active...")
 
