@@ -45,11 +45,14 @@ _log.info("Python %s | Platform: %s", sys.version, sys.platform)
 # Force Qt Multimedia FFmpeg backend to use GPU hardware acceleration
 # Available methods: d3d11va, dxva2, cuda, qsv (Intel Quick Sync)
 if sys.platform == "win32":
-    # Enable hardware acceleration for video decoding
+    # Force NVIDIA GPU for dual-GPU systems (NVIDIA + Intel)
+    # This tells Windows to prefer discrete GPU over integrated GPU
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    # Force Direct3D 11 Video Acceleration (works with NVIDIA and AMD)
     os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
-    # Let FFmpeg auto-detect best hardware decoder
-    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;auto")
-    _log.info("Hardware video decoding enabled (FFmpeg will auto-detect GPU)")
+    # Use d3d11va for better NVIDIA GPU utilization
+    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;d3d11va")
+    _log.info("Hardware video decoding enabled (using d3d11va for NVIDIA GPU)")
 
 # Windows: hide the console window when launched via pythonw or double-click
 if sys.platform == "win32":
