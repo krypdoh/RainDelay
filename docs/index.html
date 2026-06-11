@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RainDelay</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: "Archivo Black", sans-serif;
+            background: #0a0a0f;
+            color: #c8d4e6;
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Rain animation */
+        .rain {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .drop {
+            position: absolute;
+            top: -10%;
+            width: 1px;
+            height: 80px;
+            background: linear-gradient(transparent, rgba(120, 160, 220, 0.3));
+            animation: fall linear infinite;
+        }
+
+        @keyframes fall {
+            to {
+                transform: translateY(110vh);
+            }
+        }
+
+        /* Content */
+        .container {
+            position: relative;
+            z-index: 1;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 80px 24px;
+            text-align: center;
+        }
+
+        .logo-text {
+            font-size: clamp(3rem, 8vw, 5.5rem);
+            color: #e8eef6;
+            letter-spacing: -2px;
+            text-shadow: 0 0 40px rgba(100, 140, 200, 0.3);
+        }
+
+        .logo-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 48px;
+        }
+
+        .brand-copy {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            text-align: left;
+            line-height: 1;
+        }
+
+        .logo-icon {
+            width: clamp(63px, 9vw, 96px);
+            height: clamp(63px, 9vw, 96px);
+            object-fit: contain;
+            filter: drop-shadow(0 0 18px rgba(100, 140, 200, 0.35));
+        }
+
+        .tagline {
+            font-size: 1rem;
+            font-weight: 400;
+            color: #7fa8ff;
+            background: linear-gradient(90deg, #48c7ff 0%, #7ea8ff 52%, #8f6dff 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: -2px;
+            margin-bottom: 0;
+        }
+
+        .screenshot-wrapper {
+            position: relative;
+            margin: 0 auto 60px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow:
+                0 20px 60px rgba(0, 0, 0, 0.6),
+                0 0 80px rgba(60, 100, 160, 0.1);
+            border: 1px solid rgba(100, 140, 200, 0.15);
+        }
+
+        .screenshot-wrapper img,
+        .screenshot-wrapper video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .screenshot-wrapper::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(
+                180deg,
+                transparent 60%,
+                rgba(10, 10, 15, 0.7) 100%
+            );
+            pointer-events: none;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 32px;
+            margin-bottom: 60px;
+            text-align: left;
+        }
+
+        .feature {
+            padding: 24px;
+            background: rgba(20, 24, 35, 0.6);
+            border-radius: 10px;
+            border: 1px solid rgba(100, 140, 200, 0.08);
+        }
+
+        .feature h3 {
+            font-size: 1rem;
+            color: #a0b8d8;
+            margin-bottom: 8px;
+        }
+
+        .feature p {
+            font-size: 0.8rem;
+            font-weight: 400;
+            color: #4a5a70;
+            line-height: 1.6;
+        }
+
+        .cta {
+            display: inline-block;
+            padding: 16px 40px;
+            font-family: "Archivo Black", sans-serif;
+            font-size: 1rem;
+            color: #0a0a0f;
+            background: #a0b8d8;
+            border: none;
+            border-radius: 6px;
+            text-decoration: none;
+            transition: background 0.2s, transform 0.2s;
+            cursor: pointer;
+        }
+
+        .cta:hover {
+            background: #c8daf0;
+            transform: translateY(-2px);
+        }
+
+        .links-row {
+            display: flex;
+            justify-content: center;
+            gap: 14px;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+        }
+
+        .repo-link {
+            display: inline-block;
+            padding: 16px 30px;
+            font-family: "Archivo Black", sans-serif;
+            font-size: 1rem;
+            letter-spacing: 0.4px;
+            color: #c8daf0;
+            background: rgba(24, 34, 52, 0.9);
+            text-decoration: none;
+            border: 1px solid rgba(143, 179, 232, 0.45);
+            border-radius: 6px;
+            transition: background 0.2s, transform 0.2s, border-color 0.2s;
+        }
+
+        .repo-link:hover {
+            background: rgba(36, 52, 80, 0.95);
+            border-color: rgba(200, 218, 240, 0.75);
+            transform: translateY(-2px);
+        }
+
+        footer {
+            margin-top: 80px;
+            font-size: 0.7rem;
+            color: #2a3444;
+            letter-spacing: 1px;
+        }
+
+        .footer-author {
+            margin-top: 8px;
+            color: #3f4f67;
+        }
+
+        /* Subtle fog overlay */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(
+                ellipse at 50% 100%,
+                rgba(30, 50, 80, 0.15) 0%,
+                transparent 60%
+            );
+            pointer-events: none;
+            z-index: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="rain" id="rain"></div>
+
+    <div class="container">
+        <div class="logo-row">
+            <img class="logo-icon" src="raindrop.png" alt="Rain drop icon">
+            <div class="brand-copy">
+                <h1 class="logo-text">RainDelay</h1>
+                <p class="tagline">&nbsp;Take a break.&nbsp;&nbsp;Let it rain.</p>
+            </div>
+        </div>
+
+        <div class="screenshot-wrapper">
+            <video src="recording1.mp4" autoplay loop muted playsinline controls
+                   aria-label="RainDelay recording showing rain overlay on desktop"></video>
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>Real Rain</h3>
+                <p>Video-composited rain with screen-blend rendering over your blurred desktop.</p>
+            </div>
+            <div class="feature">
+                <h3>Multi-Monitor</h3>
+                <p>Covers one screen or all of them. Your choice.</p>
+            </div>
+            <div class="feature">
+                <h3>Ambient Sound</h3>
+                <p>Rain and thunder audio fades in to complete the atmosphere.</p>
+            </div>
+            <div class="feature">
+                <h3>Timers &amp; Scheduling</h3>
+                <p>Countdown breaks or set a daily schedule. It handles itself.</p>
+            </div>
+        </div>
+
+        <div class="links-row">
+            <a href="https://github.com/krypdoh/RainDelay/releases" class="cta" target="_blank" rel="noopener noreferrer">Download</a>
+            <a href="https://github.com/krypdoh/RainDelay" class="repo-link" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+        </div>
+
+        <footer>
+            <div>Built with Python &amp; PyQt6</div>
+            <div class="footer-author">Copyright 2026 - Paul R. Charovkine</div>
+        </footer>
+    </div>
+
+    <script>
+        // Generate rain drops
+        const rain = document.getElementById('rain');
+        const count = 80;
+        for (let i = 0; i < count; i++) {
+            const drop = document.createElement('div');
+            drop.classList.add('drop');
+            drop.style.left = Math.random() * 100 + '%';
+            drop.style.animationDuration = (1.2 + Math.random() * 1.5) + 's';
+            drop.style.animationDelay = Math.random() * 3 + 's';
+            drop.style.opacity = 0.2 + Math.random() * 0.4;
+            drop.style.height = (50 + Math.random() * 60) + 'px';
+            rain.appendChild(drop);
+        }
+    </script>
+</body>
+</html>
