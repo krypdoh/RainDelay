@@ -17,6 +17,7 @@ SHORTCUT_NAME = "RainDelay.lnk"
 DEFAULTS = {
     "transparency": 70,          # % transparent (higher = more see-through)
     "darkness": 0,               # 0-80: darken the background (0=none, 80=very dark)
+    "blur_strength": 50,         # 0-100: how much to blur the desktop background
     "rain_speed": "medium",       # slow / medium / fast
     "rain_frequency": "moderate", # light / moderate / heavy
     "rain_volume": 0.7,
@@ -33,6 +34,8 @@ DEFAULTS = {
     "screens": "all",            # "all" or list of screen indices e.g. [0, 1]
     "autostart": False,
     "lowres_mode": False,        # Render at 1080p then upscale (better performance on weak GPUs)
+    "rain_opacity": 40,          # 0-100: how visible the rain overlay is (0=invisible, 100=full)
+    "wiper_enabled": True,        # Enable windshield wiper animation on video loop / W key
 }
 
 # Speed / frequency lookup tables used by rain_engine and overlay

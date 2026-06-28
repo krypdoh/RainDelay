@@ -24,13 +24,12 @@ import logging
 from pathlib import Path
 
 from PyQt6.QtWidgets import QWidget, QApplication, QGraphicsView
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QRectF, QPointF, QDateTime, QElapsedTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QRectF, QPointF, QDateTime, QElapsedTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QPixmap, QImage,
+    QPainter, QColor, QPen, QBrush, QPixmap, QImage, QTransform,
     QPainterPath, QRadialGradient, QLinearGradient, QFont, QFontDatabase,
 )
-from PyQt6.QtMultimedia import QMediaPlayer
-from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
+from PyQt6.QtMultimedia import QVideoFrame
 from PyQt6.QtWidgets import QGraphicsScene
 
 log = logging.getLogger("RainDelay.overlay")
@@ -52,10 +51,12 @@ class _CustomGraphicsView(QGraphicsView):
         self._parent_overlay = parent_overlay
         self._frame_count = 0
         self._last_frame_time = 0.0
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
     def drawBackground(self, painter, rect):
         """Paint the blurred desktop background before the video."""
         overlay = self._parent_overlay
+        overlay._frame_pending = False  # allow next frame to be processed
         if overlay._bg_pixmap:
             # Scale pixmap to fill the entire scene, regardless of DPR
             scene_rect = self.scene().sceneRect()
@@ -68,14 +69,33 @@ class _CustomGraphicsView(QGraphicsView):
         if darkness > 0:
             dark_alpha = int(darkness * 2.55)
             painter.fillRect(rect, QColor(0, 0, 0, dark_alpha))
+
+        # Composite the latest video frame using alpha overlay:
+        # rain_opacity (0-100) controls transparency of the rain layer.
+        # Higher values make rain more solid/visible.
+        px = overlay._current_video_pixmap
+        if px and not px.isNull():
+            scene_rect = self.scene().sceneRect()
+            rain_opacity = overlay._settings.get("rain_opacity", 40) / 100.0
+            painter.setOpacity(rain_opacity)
+            painter.drawPixmap(scene_rect.toRect(), px)
+            painter.setOpacity(1.0)
     
     def drawForeground(self, painter, rect):
-        """Paint the text overlay on top of the video."""
-        if self._parent_overlay._show_text:
-            w = int(rect.width())
-            h = int(rect.height())
+        """Paint the wiper animation and text overlay on top of the video."""
+        overlay = self._parent_overlay
+
+        # Draw wiper if sweep animation is active
+        if overlay._wiper_active and overlay._wiper_pixmap:
+            overlay._paint_wiper(painter, rect)
+
+        w = int(rect.width())
+        h = int(rect.height())
+        if overlay._show_text:
             self._parent_overlay._paint_text_overlay(painter, w, h)
-        
+        if overlay._exit_hint_visible:
+            self._parent_overlay._paint_exit_hint(painter, w, h)
+
         # Performance tracking for video mode
         now = time.perf_counter()
         self._frame_count += 1
@@ -85,51 +105,79 @@ class _CustomGraphicsView(QGraphicsView):
         if overlay._perf_window_start == 0.0:
             overlay._perf_window_start = now
         
-        # Log every N frames
+        # Log every N frames (use debug level to avoid disk I/O in paint path)
         if overlay._frame_count % overlay._fps_log_interval == 0:
             elapsed = max(now - overlay._perf_window_start, 1e-6)
             effective_fps = overlay._fps_log_interval / elapsed
-            
-            log.info("[PERF] effective fps: %.1f | video: GPU rendering",
-                     effective_fps)
+
+            log.debug("[PERF] effective fps: %.1f | video: GPU rendering",
+                      effective_fps)
             overlay._perf_window_start = now
     
     def mousePressEvent(self, event):
-        """Toggle text overlay on click."""
-        self._parent_overlay._show_text = not self._parent_overlay._show_text
-        self.viewport().update()
+        self._parent_overlay._handle_mouse_press()
         event.accept()
-    
+
     def keyPressEvent(self, event):
-        """Forward key events to parent overlay."""
-        if event.key() == Qt.Key.Key_Escape:
-            self._parent_overlay.dismiss.emit()
-        else:
-            event.accept()
+        self._parent_overlay._handle_key(event)
+        event.accept()
 
 
-def _find_rain_video():
-    """Look for a rain overlay video in assets/."""
-    # Try native resolution version first (no scaling = best performance)
-    for ext in _VIDEO_EXTS:
-        p = _ASSETS / f"rain_native{ext}"
-        if p.exists():
-            return str(p)
-    # Fall back to standard rain video
-    for ext in _VIDEO_EXTS:
-        p = _ASSETS / f"rain{ext}"
-        if p.exists():
-            return str(p)
-    # Lower-res version as fallback
-    for ext in _VIDEO_EXTS:
-        p = _ASSETS / f"rain_lowres{ext}"
-        if p.exists():
-            return str(p)
-    # Also check for any video file in assets/
-    if _ASSETS.exists():
-        for f in _ASSETS.iterdir():
-            if f.suffix.lower() in _VIDEO_EXTS:
-                return str(f)
+import re as _re
+
+
+def _find_rain_video(screen_w: int = 0, screen_h: int = 0):
+    """Find the best-matching rain video for the target screen resolution.
+
+    Search order:
+      1. Exact resolution match (e.g. rain_1920x1200.mp4 for a 1920x1200 screen)
+      2. Closest larger resolution (downscale is cheap)
+      3. Closest smaller resolution (upscale with FastTransformation)
+      4. Legacy names: rain_native.* → rain.* → rain_lowres.*
+      5. Any video file in assets/
+    """
+    if not _ASSETS.exists():
+        return None
+
+    # Collect resolution-tagged videos: rain_WxH.ext
+    _RES_PATTERN = _re.compile(r"rain_(\d+)x(\d+)", _re.IGNORECASE)
+    candidates = []  # list of (path, w, h)
+    for f in _ASSETS.iterdir():
+        if f.suffix.lower() not in _VIDEO_EXTS:
+            continue
+        m = _RES_PATTERN.match(f.stem)
+        if m:
+            candidates.append((str(f), int(m.group(1)), int(m.group(2))))
+
+    if candidates and screen_w > 0 and screen_h > 0:
+        # Sort by how close the resolution is to the target screen
+        # Prefer exact match, then closest larger, then closest smaller
+        def _score(item):
+            _, vw, vh = item
+            dw, dh = vw - screen_w, vh - screen_h
+            if dw == 0 and dh == 0:
+                return (0, 0)  # exact match — best
+            # Prefer larger (score 1) over smaller (score 2)
+            tier = 1 if (dw >= 0 and dh >= 0) else 2
+            return (tier, abs(dw) + abs(dh))
+
+        candidates.sort(key=_score)
+        best = candidates[0]
+        log.info("  Resolution picker: screen=%dx%d → selected %s (%dx%d)",
+                 screen_w, screen_h, Path(best[0]).name, best[1], best[2])
+        return best[0]
+
+    # Legacy fallback names
+    for prefix in ("rain_native", "rain", "rain_lowres"):
+        for ext in _VIDEO_EXTS:
+            p = _ASSETS / f"{prefix}{ext}"
+            if p.exists():
+                return str(p)
+
+    # Any video file in assets/
+    for f in _ASSETS.iterdir():
+        if f.suffix.lower() in _VIDEO_EXTS:
+            return str(f)
     return None
 
 
@@ -137,6 +185,7 @@ class RainOverlay(QWidget):
     """Full-screen overlay: blurred desktop + rain video (or rendered fallback)."""
 
     dismiss = pyqtSignal()
+    wiper_requested = pyqtSignal()  # emitted on W key; main.py triggers all overlays
 
     def __init__(self, settings: dict, target_screen=None):
         super().__init__()
@@ -144,11 +193,20 @@ class RainOverlay(QWidget):
         self._target_screen = target_screen  # QScreen or None for primary
         self._bg_pixmap = None
         self._use_video = False
-        self._video_item = None  # QGraphicsVideoItem for GPU-accelerated rendering
+        self._video_sink = None       # unused (shared sink in main.py)
+        self._current_video_pixmap = None  # Latest frame as QPixmap for Screen blend compositing
+        self._frame_pending = False  # True when a frame is ready but not yet painted
+        self._scene_size = None  # (w, h) of graphics scene for frame pre-scaling
         self._graphics_view = None  # QGraphicsView to display the video
-        self._media_player = None  # QMediaPlayer for this overlay
+        self._media_player = None  # unused (shared player in main.py)
+        self._fade_anim = None    # QPropertyAnimation for fade-in
         self._show_text = False
+        self._exit_hint_visible = False
         self._countdown_remaining_ms = 0  # set externally by main.py
+        self._exit_hint_timer = QTimer(self)
+        self._exit_hint_timer.setSingleShot(True)
+        self._exit_hint_timer.setInterval(3000)
+        self._exit_hint_timer.timeout.connect(self._hide_exit_hint)
         self._timer = QTimer(self)
         self._timer.setInterval(33)  # ~30fps for rendered fallback
         self._timer.timeout.connect(self._tick)
@@ -164,6 +222,13 @@ class RainOverlay(QWidget):
         self._slow_paint_threshold = 33.0  # log paint times exceeding this (ms)
         # Video decode diagnostics
         self._paint_time_samples = []  # track paint times for statistics
+        # Wiper animation state
+        self._wiper_pixmap = None      # loaded wiper PNG
+        self._wiper_active = False     # True during sweep animation
+        self._wiper_angle_val = -70.0  # current sweep angle (degrees)
+        self._wiper_anim = None        # QPropertyAnimation for the sweep
+        self._last_video_pos = 0       # for detecting video loop restart
+        self._video_duration = 0       # video duration in ms
         self._setup_window()
 
     def _setup_window(self):
@@ -198,8 +263,8 @@ class RainOverlay(QWidget):
 
         w, h = geom.width(), geom.height()
 
-        # Try to open rain video via QVideoWidget for GPU-accelerated rendering
-        video_path = _find_rain_video()
+        # Try to set up video compositing view (actual player is in main.py)
+        video_path = _find_rain_video(w, h)
         if video_path:
             log.info("  Using video rain: %s", video_path)
             try:
@@ -212,32 +277,60 @@ class RainOverlay(QWidget):
         else:
             log.warning("  No video file found in assets/ — rain video required")
 
+        self.setWindowOpacity(0.0)
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
+        if self._graphics_view:
+            self._graphics_view.setFocus()
+        else:
+            self.setFocus()
+
+        # Fade in from transparent to fully opaque over 500ms
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_anim.setDuration(500)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Clear our reference when the animation finishes so deactivate() doesn't
+        # try to call .stop() on an already-deleted C++ object.
+        self._fade_anim.finished.connect(lambda: setattr(self, '_fade_anim', None))
+        self._fade_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
         self._reset_perf_counters()
         if self._use_video:
-            self._log_video_diagnostics()
+            # Defer diagnostics to next event loop iteration so activate() returns fast
+            QTimer.singleShot(0, self._log_video_diagnostics)
         self._timer.start()
         log.info("  Overlay activated in %.0fms",
                  (time.perf_counter() - t_start) * 1000)
 
     def deactivate(self):
+        # Stop fade-in animation if still running
+        if self._fade_anim:
+            self._fade_anim.stop()
+            self._fade_anim = None
         self._timer.stop()
-        if self._media_player:
-            self._media_player.stop()
-            self._media_player.setSource(QUrl())
-            self._media_player = None
-        # Clean up graphics view (which will clean up the video item automatically)
+        self._exit_hint_timer.stop()
+        self._exit_hint_visible = False
+        # Stop wiper animation
+        if self._wiper_anim:
+            self._wiper_anim.stop()
+            self._wiper_anim = None
+        self._wiper_active = False
+        # No media player to stop — main.py owns the shared player
+        self._current_video_pixmap = None
+        self._frame_pending = False
+        self._scene_size = None
+        # Clean up graphics view
         if self._graphics_view:
             self._graphics_view.hide()
             self._graphics_view.deleteLater()
             self._graphics_view = None
-        # Video item is owned by the scene, don't delete it separately
-        self._video_item = None
         self._bg_pixmap = None
         self._use_video = False
         self._reset_perf_counters()
+        self.setWindowOpacity(1.0)
         self.hide()
 
     def update_settings(self, settings: dict):
@@ -248,25 +341,21 @@ class RainOverlay(QWidget):
         self._countdown_remaining_ms = ms
 
     # ================================================================== #
-    #  Video widget setup (GPU-accelerated rendering with blend mode)
+    #  Video widget setup (receives frames from shared player in main.py)
     # ================================================================== #
 
     def _setup_video_widget(self, video_path: str, w: int, h: int):
-        """Set up QGraphicsVideoItem for GPU-accelerated video rendering with screen blend."""
-        # Create media player
-        self._media_player = QMediaPlayer(self)
+        """Set up QGraphicsView for frame-by-frame compositing with Screen blend mode.
         
-        # Create graphics scene — drawBackground in _CustomGraphicsView paints the bg pixmap
+        NOTE: No QMediaPlayer is created here. main.py owns a single shared player
+        and connects its videoFrameChanged signal to our _on_video_frame method.
+        This avoids creating multiple D3D11 devices (which crashes on degraded GPU).
+        """
+        # Create graphics scene — drawBackground paints bg + composited video frame
         scene = QGraphicsScene()
         scene.setSceneRect(0, 0, w, h)
-        
-        # Video item — IgnoreAspectRatio so it fills the full screen (no letterbox bars)
-        self._video_item = QGraphicsVideoItem()
-        self._video_item.setSize(QRectF(0, 0, w, h).size())
-        self._video_item.setPos(0, 0)
-        self._video_item.setAspectRatioMode(Qt.AspectRatioMode.IgnoreAspectRatio)
-        scene.addItem(self._video_item)
-        
+        self._scene_size = (w, h)  # used to pre-scale frames in _on_video_frame
+
         # Create custom graphics view as child of this overlay
         self._graphics_view = _CustomGraphicsView(scene, self, self)
         self._graphics_view.setGeometry(0, 0, w, h)
@@ -276,83 +365,86 @@ class RainOverlay(QWidget):
         self._graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._graphics_view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._graphics_view.setSceneRect(0, 0, w, h)
-        
-        # Enable OpenGL rendering for better performance (optional)
-        try:
-            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-            self._graphics_view.setViewport(QOpenGLWidget())
-            log.info("  [PERF] OpenGL viewport enabled for hardware acceleration")
-        except:
-            log.info("  [PERF] Using default viewport (OpenGL not available)")
-        
-        # Connect player to video item
-        self._media_player.setVideoOutput(self._video_item)
-        
-        # Set source and loop infinitely
-        self._media_player.setSource(QUrl.fromLocalFile(video_path))
-        self._media_player.setLoops(QMediaPlayer.Loops.Infinite)
-        
-        # Log diagnostics
-        try:
-            import platform
-            import sys
-            from PyQt6.QtCore import qVersion
-            
-            log.info("[DIAG] ========== SYSTEM DIAGNOSTICS ==========")
-            log.info("[DIAG] OS: %s %s", platform.system(), platform.release())
-            log.info("[DIAG] OS Version: %s", platform.version())
-            log.info("[DIAG] CPU: %s", platform.processor() or platform.machine())
-            log.info("[DIAG] Python: %s", sys.version.split()[0])
-            log.info("[DIAG] Qt Version: %s", qVersion())
-            
-            # GPU detection (Windows)
-            if platform.system() == "Windows":
-                import subprocess
-                try:
-                    result = subprocess.run(
-                        ["powershell", "-Command", "Get-WmiObject Win32_VideoController | Select Name | Format-List"],
-                        capture_output=True, text=True, timeout=2, creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    if result.returncode == 0:
-                        for line in result.stdout.split('\n'):
-                            line = line.strip()
-                            if line and ':' in line:
-                                log.info("[DIAG] GPU: %s", line)
-                except:
-                    log.info("[DIAG] GPU: Detection failed")
-            
-            log.info("[DIAG] Using QGraphicsVideoItem for direct GPU rendering (no CPU conversion)")
-            log.info("[DIAG] =========================================")
-        except Exception as e:
-            log.debug("[DIAG] System info failed: %s", e)
-        
-        # Log playback errors
-        self._media_player.errorOccurred.connect(
-            lambda err: log.warning("[PERF] Video playback error: %s", self._media_player.errorString())
-        )
-        
-        # Show graphics view and start playback
+
+        # Performance hints: disable antialiasing for video compositing
+        self._graphics_view.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        self._graphics_view.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform, False)
+        self._graphics_view.setOptimizationFlag(
+            QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True)
+
+        # Show graphics view (playback is started by main.py after connecting signals)
         self._graphics_view.show()
         self._graphics_view.raise_()
-        self._media_player.play()
-        log.info("  [PERF] Starting GPU-accelerated video playback from: %s", video_path)
+        log.info("  [PERF] Video view ready for Screen blend compositing")
+
+        # Load wiper image for loop-transition animation
+        wiper_path = _ASSETS / "wiper_transparent_pro.png"
+        if wiper_path.exists():
+            raw = QPixmap(str(wiper_path))
+            if not raw.isNull():
+                # Pre-scale wiper to 72% of screen height so paint just rotates
+                wiper_length = int(h * 0.72)
+                scale_factor = wiper_length / raw.height()
+                scaled_w = int(raw.width() * scale_factor)
+                self._wiper_pixmap = raw.scaled(
+                    scaled_w, wiper_length,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+                log.debug("  Wiper image loaded and pre-scaled: %dx%d",
+                          self._wiper_pixmap.width(), self._wiper_pixmap.height())
+            else:
+                self._wiper_pixmap = None
+
+    def _on_video_frame(self, frame: QVideoFrame):
+        """Receive a decoded video frame, convert to QPixmap (GPU-resident), trigger repaint."""
+        # Skip frame if previous hasn't been painted yet (avoids saturating
+        # the event loop with frame conversions on multi-monitor setups)
+        if self._frame_pending:
+            return
+        if not frame.isValid():
+            return
+        img = frame.toImage()
+        if img.isNull():
+            return
+        # Convert to ARGB32_Premultiplied once on CPU, then upload to GPU as QPixmap.
+        # QPixmap is GPU-resident so drawPixmap in paint is hardware-accelerated.
+        # Pre-scale to scene size so drawPixmap does no scaling at paint time.
+        img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        if self._scene_size:
+            w, h = self._scene_size
+            if img.width() != w or img.height() != h:
+                # FastTransformation (nearest-neighbor) is 5-10x faster than Smooth
+                # and visually indistinguishable on rain-over-blur compositing
+                img = img.scaled(w, h,
+                                 Qt.AspectRatioMode.IgnoreAspectRatio,
+                                 Qt.TransformationMode.FastTransformation)
+        self._current_video_pixmap = QPixmap.fromImage(img)
+        self._frame_pending = True
+        if self._graphics_view:
+            self._graphics_view.viewport().update()
 
     # ================================================================== #
     #  Blur
     # ================================================================== #
 
     def _blur_pixmap(self, px):
-        """Fast blur via downscale/upscale. Transparency controls blur amount."""
-        transparency = self._settings.get("transparency", 70)
-        scale = max(3, min(14, int(transparency / 8) + 3))
+        """Fast blur via downscale/upscale. blur_strength controls blur amount."""
+        blur_strength = self._settings.get("blur_strength", 50)
+        if blur_strength == 0:
+            return px  # no blur requested
+        # Map 1-100 to scale factor 3-20 (higher scale = more blur)
+        scale = max(3, min(20, int(blur_strength / 5) + 3))
 
         w, h = px.width(), px.height()
         small = px.scaled(w // scale, h // scale,
                           Qt.AspectRatioMode.IgnoreAspectRatio,
                           Qt.TransformationMode.SmoothTransformation)
+        # Upscale with FastTransformation — result is intentionally blurry
+        # so quality scaling adds no visible benefit, only CPU cost
         blurred = small.scaled(w, h,
                                Qt.AspectRatioMode.IgnoreAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
+                               Qt.TransformationMode.FastTransformation)
         return blurred
 
     # ================================================================== #
@@ -371,43 +463,123 @@ class RainOverlay(QWidget):
 
     def _log_video_diagnostics(self):
         """Log detailed video subsystem diagnostics on startup"""
-        if not self._media_player:
+        if not self._use_video:
             return
-        
-        source = self._media_player.source().toLocalFile()
-        
-        # Get playback state
-        state_map = {
-            0: "StoppedState",
-            1: "PlayingState", 
-            2: "PausedState"
-        }
-        state_name = state_map.get(self._media_player.playbackState(), "UnknownState")
-        
         log.info("[DIAG] ========== VIDEO DIAGNOSTICS ==========")
-        log.info("[DIAG] Source: %s", source)
-        log.info("[DIAG] Playback State: %s", state_name)
         log.info("[DIAG] Display: %dx%d @ %.2f DPI scale", 
                  self.width(), self.height(), 
                  self.screen().devicePixelRatio() if self.screen() else 1.0)
-        log.info("[DIAG] Rendering: QGraphicsVideoItem (GPU-accelerated, no CPU conversion)")
-        log.info("[DIAG] Target: 30fps native video playback")
-        log.info("[DIAG] Note: Video is rendered directly by GPU, bypassing slow CPU NV12→RGB conversion")
+        log.info("[DIAG] Rendering: Shared player → Screen blend compositing")
+        log.info("[DIAG] Target: 30fps video playback with CPU compositing")
         log.info("[DIAG] =========================================")
         log.info("[PERF] Performance monitoring active...")
 
     def _tick(self):
-        # Refresh the text overlay on the graphics view each tick
+        # In video mode, _on_video_frame already triggers repaints at video
+        # framerate. Only force a repaint here for non-video mode (rendered
+        # fallback) or when text overlay needs a clock/countdown refresh.
+        if self._graphics_view and not self._use_video:
+            self._graphics_view.viewport().update()
+
+    # ================================================================== #
+    #  Wiper sweep animation
+    # ================================================================== #
+
+    def _get_wiper_angle(self) -> float:
+        return self._wiper_angle_val
+
+    def _set_wiper_angle(self, angle: float) -> None:
+        self._wiper_angle_val = angle
+        # Request repaint so the wiper is drawn at the new angle
         if self._graphics_view:
             self._graphics_view.viewport().update()
+
+    wiper_angle = pyqtProperty(float, _get_wiper_angle, _set_wiper_angle)
+
+    def _on_position_changed(self, position: int) -> None:
+        """Detect video loop restart by watching for position to jump backward."""
+        if self._video_duration <= 0:
+            self._last_video_pos = position
+            return
+        # Loop detected: position jumped from near the end to near the start
+        if (self._last_video_pos > self._video_duration * 0.85
+                and position < self._video_duration * 0.15):
+            if self._settings.get("wiper_enabled", True):
+                self._start_wiper_sweep()
+        self._last_video_pos = position
+
+    def trigger_wiper(self) -> None:
+        """Manually trigger wiper sweep (video restart handled by main.py)."""
+        if not self._settings.get("wiper_enabled", True):
+            return
+        if not self._wiper_pixmap or self._wiper_active:
+            return
+        self._start_wiper_sweep()
+
+    def _start_wiper_sweep(self) -> None:
+        """Trigger a single left-to-right wiper sweep animation."""
+        if not self._wiper_pixmap or self._wiper_active:
+            return
+        log.debug("Wiper sweep triggered")
+        self._wiper_active = True
+        self._wiper_angle_val = -90.0
+
+        self._wiper_anim = QPropertyAnimation(self, b"wiper_angle", self)
+        self._wiper_anim.setDuration(1500)  # 1.5 second sweep
+        self._wiper_anim.setStartValue(-90.0)   # start: upper-left (off-screen left)
+        self._wiper_anim.setEndValue(135.0)     # end: past bottom-right (off-screen)
+        self._wiper_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self._wiper_anim.finished.connect(self._on_wiper_finished)
+        self._wiper_anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _on_wiper_finished(self) -> None:
+        """Called when the wiper sweep completes."""
+        self._wiper_active = False
+        self._wiper_anim = None
+        # One final repaint to clear the wiper from screen
+        if self._graphics_view:
+            self._graphics_view.viewport().update()
+
+    def _paint_wiper(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw the pre-scaled wiper image rotated around a pivot at bottom-center."""
+        w = int(rect.width())
+        h = int(rect.height())
+
+        # Pivot position: bottom-center of the screen, slightly below visible area
+        pivot_x = w * 0.5
+        pivot_y = h + 20
+
+        img_h = self._wiper_pixmap.height()
+
+        painter.save()
+        # No SmoothPixmapTransform — wiper is pre-scaled and fast-moving
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+
+        # Move origin to pivot, rotate, then draw image offset so pivot
+        # aligns with the ball-joint corner (bottom-left of the image)
+        painter.translate(pivot_x, pivot_y)
+        # Angle 0 = wiper pointing straight up; negative = left, positive = right
+        # The image's natural orientation has pivot at bottom-left pointing upper-right (~+45°)
+        # Adjust by -45° so angle=0 means straight up
+        painter.rotate(self._wiper_angle_val - 45.0)
+        # Draw so the pivot corner (bottom-left of image) is at origin
+        painter.drawPixmap(0, -img_h, self._wiper_pixmap)
+
+        painter.restore()
 
     # ================================================================== #
     #  Painting
     # ================================================================== #
 
-    def paintEvent(self, _event):
-        """QGraphicsView handles all painting in video mode."""
-        pass
+    def paintEvent(self, event):
+        """QGraphicsView handles painting in video mode; paint hint in fallback."""
+        if self._graphics_view:
+            return
+        if not self._exit_hint_visible:
+            return
+        p = QPainter(self)
+        self._paint_exit_hint(p, self.width(), self.height())
+        p.end()
 
     # ================================================================== #
     #  Text overlay (title + timer/clock)
@@ -457,7 +629,6 @@ class RainOverlay(QWidget):
         # Time line: countdown remaining or current clock
         time_font = QFont(self._archivo_family(), 26)
         p.setFont(time_font)
-        p.setPen(QColor(200, 220, 255, 200))
 
         countdown_ms = self._countdown_remaining_ms
         if countdown_ms > 0:
@@ -471,27 +642,83 @@ class RainOverlay(QWidget):
             else:
                 time_str = f"{mins:02d}:{secs:02d}"
         else:
-            # Show current time with seconds
+            # Show current time in 12-hour AM/PM format
             now = datetime.now()
-            time_str = now.strftime("%H:%M:%S")
+            time_str = now.strftime("%-I:%M:%S %p") if sys.platform != "win32" \
+                else now.strftime("%#I:%M:%S %p")
+
+        # Rainbow color that cycles smoothly over time (~10 second full cycle)
+        import colorsys
+        hue = (time.perf_counter() % 10.0) / 10.0  # 0.0–1.0 over 10 seconds
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.6, 1.0)  # saturation 0.6 keeps it pastel/readable
+        p.setPen(QColor(int(r * 255), int(g * 255), int(b * 255), 220))
 
         time_rect = QRectF(0, pill_y + 75, w, 45)
         p.drawText(time_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                    time_str)
+
+    def _paint_exit_hint(self, p, w, h):
+        """Draw temporary top-left hint for how to exit the overlay."""
+        margin = 16
+        pill_h = 36
+        pill_w = 370
+        pill_x = margin
+        pill_y = margin
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 75))
+        p.drawRoundedRect(QRectF(pill_x, pill_y, pill_w, pill_h), 8, 8)
+        hint_font = QFont(self._archivo_family(), 12)
+        p.setFont(hint_font)
+        p.setPen(QColor(255, 255, 255, 200))
+        text_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
+        p.drawText(text_rect,
+                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                   "Press ESC or SPACEBAR to Exit")
+
+    # ================================================================== #
+    #  Exit hint + input handling
+    # ================================================================== #
+
+    def _arm_exit_hint(self):
+        self._exit_hint_visible = True
+        self._exit_hint_timer.start()
+        self._request_repaint()
+
+    def _hide_exit_hint(self):
+        self._exit_hint_visible = False
+        self._request_repaint()
+
+    def _request_repaint(self):
+        if self._graphics_view:
+            self._graphics_view.viewport().update()
+        else:
+            self.update()
+
+    def _handle_key(self, event):
+        if event.isAutoRepeat():
+            return
+        key = event.key()
+        if key in (Qt.Key.Key_Escape, Qt.Key.Key_Space):
+            self.dismiss.emit()
+            return
+        if key == Qt.Key.Key_W:
+            self.wiper_requested.emit()
+        self._arm_exit_hint()
+
+    def _handle_mouse_press(self):
+        self._show_text = not self._show_text
+        self._request_repaint()
 
     # ================================================================== #
     #  Event handling
     # ================================================================== #
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            self.dismiss.emit()
-        else:
-            event.accept()
+        self._handle_key(event)
+        event.accept()
 
     def mousePressEvent(self, event):
-        # Toggle the time/title overlay on click
-        self._show_text = not self._show_text
+        self._handle_mouse_press()
         event.accept()
 
     def mouseReleaseEvent(self, event):

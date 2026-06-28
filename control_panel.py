@@ -22,6 +22,7 @@ from PyQt6.QtCore import Qt, QTime, pyqtSignal, QKeyCombination
 from PyQt6.QtGui  import QKeySequence
 
 import settings_manager as sm
+from overlay import _find_rain_video
 from hotkey_manager import (
     qt_key_to_vk, qt_modifiers_to_win, mods_vk_to_display
 )
@@ -105,8 +106,26 @@ class ControlPanel(QDialog):
 
         lay.addWidget(_separator())
 
-        # Speed
-        lay.addWidget(_heading("Rain Speed"))
+        # Background Blur
+        lay.addWidget(_heading("Desktop Background Blur"))
+        self._blur_slider = _labeled_slider(
+            lay, "None", "Max",
+            0, 100, self._settings.get("blur_strength", 50)
+        )
+        self._blur_label = QLabel(
+            f"{self._settings.get('blur_strength', 50)}%"
+        )
+        self._blur_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._blur_label)
+        self._blur_slider.valueChanged.connect(
+            lambda v: self._blur_label.setText(f"{v}%")
+        )
+
+        # Speed & Frequency — only relevant for rendered fallback (no video)
+        self._speed_sep = _separator()
+        lay.addWidget(self._speed_sep)
+        self._speed_heading = _heading("Rain Speed")
+        lay.addWidget(self._speed_heading)
         self._speed_combo = QComboBox()
         self._speed_combo.addItems(["Slow", "Medium", "Fast"])
         self._speed_combo.setCurrentText(
@@ -114,16 +133,51 @@ class ControlPanel(QDialog):
         )
         lay.addWidget(self._speed_combo)
 
-        lay.addWidget(_separator())
+        self._freq_sep = _separator()
+        lay.addWidget(self._freq_sep)
 
-        # Frequency
-        lay.addWidget(_heading("Rain Frequency"))
+        self._freq_heading = _heading("Rain Frequency")
+        lay.addWidget(self._freq_heading)
         self._freq_combo = QComboBox()
         self._freq_combo.addItems(["Light", "Moderate", "Heavy"])
         self._freq_combo.setCurrentText(
             self._settings.get("rain_frequency", "moderate").capitalize()
         )
         lay.addWidget(self._freq_combo)
+
+        # Hide speed/frequency when video mode is active (settings are baked into video)
+        has_video = _find_rain_video() is not None
+        if has_video:
+            self._speed_sep.hide()
+            self._speed_heading.hide()
+            self._speed_combo.hide()
+            self._freq_sep.hide()
+            self._freq_heading.hide()
+            self._freq_combo.hide()
+
+        lay.addWidget(_separator())
+
+        # Rain Opacity
+        lay.addWidget(_heading("Rain Opacity"))
+        self._rain_opacity_slider = _labeled_slider(
+            lay, "Subtle", "Full",
+            0, 100, self._settings.get("rain_opacity", 40)
+        )
+        self._rain_opacity_label = QLabel(
+            f"{self._settings.get('rain_opacity', 40)}%"
+        )
+        self._rain_opacity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._rain_opacity_label)
+        self._rain_opacity_slider.valueChanged.connect(
+            lambda v: self._rain_opacity_label.setText(f"{v}%")
+        )
+
+        lay.addWidget(_separator())
+
+        # Wiper
+        self._wiper_enabled_cb = QCheckBox("Enable Wiper  (press W to trigger)")
+        self._wiper_enabled_cb.setChecked(self._settings.get("wiper_enabled", True))
+        lay.addWidget(self._wiper_enabled_cb)
 
         lay.addStretch()
         return w
@@ -370,8 +424,11 @@ class ControlPanel(QDialog):
     def _on_save(self) -> None:
         self._settings["transparency"]       = self._transparency_slider.value()
         self._settings["darkness"]           = self._darkness_slider.value()
+        self._settings["blur_strength"]      = self._blur_slider.value()
         self._settings["rain_speed"]         = self._speed_combo.currentText().lower()
         self._settings["rain_frequency"]     = self._freq_combo.currentText().lower()
+        self._settings["rain_opacity"]       = self._rain_opacity_slider.value()
+        self._settings["wiper_enabled"]      = self._wiper_enabled_cb.isChecked()
         self._settings["rain_volume"]        = self._rain_vol_slider.value() / 100.0
         self._settings["thunder_volume"]     = self._thunder_vol_slider.value() / 100.0
         self._settings["thunder_enabled"]    = self._thunder_enabled_cb.isChecked()

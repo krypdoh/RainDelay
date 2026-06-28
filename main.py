@@ -1,6 +1,6 @@
 """
 main.py
-2026.06.11.0104
+2026.06.28 1044
 RainDelay entry point.
 
 Start-up sequence:
@@ -41,18 +41,65 @@ _log = logging.getLogger("RainDelay")
 _log.info("RainDelay starting — log file: %s", _log_file)
 _log.info("Python %s | Platform: %s", sys.version, sys.platform)
 
-# ── Enable FFmpeg hardware video decoding ──────────────────────────────
-# Force Qt Multimedia FFmpeg backend to use GPU hardware acceleration
-# Available methods: d3d11va, dxva2, cuda, qsv (Intel Quick Sync)
+# ── Qt Multimedia backend ──────────────────────────────────────────────
+_d3d11_ok = True  # assume GPU is available until proven otherwise
 if sys.platform == "win32":
-    # Force NVIDIA GPU for dual-GPU systems (NVIDIA + Intel)
-    # This tells Windows to prefer discrete GPU over integrated GPU
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-    # Force Direct3D 11 Video Acceleration (works with NVIDIA and AMD)
-    os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
-    # Use d3d11va for better NVIDIA GPU utilization
-    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "hwaccel;d3d11va")
-    _log.info("Hardware video decoding enabled (using d3d11va for NVIDIA GPU)")
+    # Probe D3D11 with VIDEO_SUPPORT flag (0x800) — this is what FFmpeg uses.
+    # If D3D11 is broken, FFmpeg crashes instead of falling back gracefully.
+    # In that case, use Windows Media Foundation backend (no D3D11 dependency).
+    try:
+        import ctypes
+        _d3d11 = ctypes.windll.d3d11
+        _device = ctypes.c_void_p()
+        _context = ctypes.c_void_p()
+        _level = ctypes.c_int()
+        _D3D11_CREATE_DEVICE_VIDEO_SUPPORT = 0x800
+        _hr = _d3d11.D3D11CreateDevice(
+            None,              # pAdapter (NULL = default)
+            1,                 # D3D_DRIVER_TYPE_HARDWARE
+            None,              # Software module
+            _D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            None,              # pFeatureLevels
+            0,                 # FeatureLevels count
+            7,                 # SDK version (D3D11_SDK_VERSION)
+            ctypes.byref(_device),
+            ctypes.byref(_level),
+            ctypes.byref(_context),
+        )
+        if _hr == 0:  # S_OK
+            # Release immediately — we only needed to test availability
+            _release_fn = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+            if _context.value:
+                _vtbl = ctypes.cast(
+                    ctypes.c_void_p(ctypes.cast(_context, ctypes.POINTER(ctypes.c_void_p))[0]),
+                    ctypes.POINTER(ctypes.c_void_p))
+                _rel = _release_fn(_vtbl[2])
+                _rel(_context)
+            if _device.value:
+                _vtbl = ctypes.cast(
+                    ctypes.c_void_p(ctypes.cast(_device, ctypes.POINTER(ctypes.c_void_p))[0]),
+                    ctypes.POINTER(ctypes.c_void_p))
+                _rel = _release_fn(_vtbl[2])
+                _rel(_device)
+            _d3d11_ok = True
+            _log.info("D3D11 probe: OK — using FFmpeg backend")
+        else:
+            _d3d11_ok = False
+            _log.warning("D3D11 probe: FAILED (hr=0x%08X) — using WMF backend",
+                         _hr & 0xFFFFFFFF)
+    except Exception as e:
+        _d3d11_ok = False
+        _log.warning("D3D11 probe: exception (%s) — using WMF backend", e)
+
+    # Choose backend based on D3D11 availability:
+    # - FFmpeg: faster, but crashes if D3D11 device creation fails
+    # - WMF (Windows Media Foundation): no D3D11 dependency, always works
+    if _d3d11_ok:
+        os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
+        _log.info("Qt Multimedia: FFmpeg backend (D3D11 available)")
+    else:
+        os.environ["QT_MEDIA_BACKEND"] = "windows"
+        _log.info("Qt Multimedia: Windows Media Foundation backend (D3D11 unavailable)")
 
 # Windows: hide the console window when launched via pythonw or double-click
 if sys.platform == "win32":
@@ -65,10 +112,11 @@ if sys.platform == "win32":
         pass
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore    import Qt, QTimer
+from PyQt6.QtCore    import Qt, QTimer, QUrl
+from PyQt6.QtMultimedia import QMediaPlayer, QVideoSink
 
 import settings_manager as sm
-from overlay        import RainOverlay
+from overlay        import RainOverlay, _find_rain_video
 from tray_icon      import TrayIcon
 from sound_manager  import SoundManager
 from scheduler      import Scheduler
@@ -110,6 +158,8 @@ def main() -> None:
     #  Construct components
     # ------------------------------------------------------------------ #
     overlays = []   # list of RainOverlay instances (one per screen)
+    _shared_player = [None]  # single QMediaPlayer shared across all overlays
+    _shared_sink = [None]    # QVideoSink that broadcasts frames
     tray     = TrayIcon()
     sound    = SoundManager(settings)
     sched    = Scheduler(settings)
@@ -141,6 +191,7 @@ def main() -> None:
         for scr in _get_target_screens():
             ov = RainOverlay(settings, target_screen=scr)
             ov.dismiss.connect(_hide_overlay)
+            ov.wiper_requested.connect(_trigger_all_wipers)
             overlays.append(ov)
 
     # ------------------------------------------------------------------ #
@@ -153,14 +204,56 @@ def main() -> None:
         _log.info("Overlay SHOW requested")
         _active[0] = True
         _create_overlays()
+
+        # Create ONE shared media player for all overlays (avoids multiple
+        # D3D11 device creations which crash on degraded GPU state).
+        # Even if D3D11 is broken, a single player gracefully falls back to
+        # software decode — the crash only happened with 2+ players.
+        screens = _get_target_screens()
+        if screens:
+            geom = screens[0].geometry()
+            video_path = _find_rain_video(geom.width(), geom.height())
+            if video_path:
+                player = QMediaPlayer()
+                sink = QVideoSink()
+                player.setVideoOutput(sink)
+                player.setSource(QUrl.fromLocalFile(video_path))
+                player.setLoops(QMediaPlayer.Loops.Infinite)
+                player.errorOccurred.connect(
+                    lambda err, p=player: _log.warning(
+                        "Shared player error: %s", p.errorString()))
+                _shared_player[0] = player
+                _shared_sink[0] = sink
+                _log.info("Shared video player created: %s", video_path)
+
         for ov in overlays:
             ov.activate()
+
+        # Connect shared sink frames + position to all overlays
+        if _shared_sink[0]:
+            for ov in overlays:
+                _shared_sink[0].videoFrameChanged.connect(ov._on_video_frame)
+        if _shared_player[0]:
+            _shared_player[0].positionChanged.connect(_broadcast_position)
+            _shared_player[0].durationChanged.connect(_broadcast_duration)
+            _shared_player[0].play()
+
         sound.play()
         tray.set_overlay_state(True)
         if settings.get("countdown_enabled", False):
             sched.start_countdown()
-        tray.show_notification("RainDelay", "Taking a break \u2614  Press ESC to dismiss.")
+        tray.show_notification("RainDelay", "Taking a break \u2614  Press ESC or SPACEBAR to dismiss.")
         _log.info("Overlay SHOW complete — %d screen(s)", len(overlays))
+
+    def _broadcast_position(pos: int) -> None:
+        """Forward shared player position to all overlays for wiper detection."""
+        for ov in overlays:
+            ov._on_position_changed(pos)
+
+    def _broadcast_duration(dur: int) -> None:
+        """Forward shared player duration to all overlays."""
+        for ov in overlays:
+            ov._video_duration = dur
 
     def _hide_overlay() -> None:
         if not _active[0]:
@@ -169,6 +262,15 @@ def main() -> None:
         _active[0] = False
         for ov in overlays:
             ov.deactivate()
+        # Stop and clean up shared player
+        if _shared_player[0]:
+            _shared_player[0].stop()
+            _shared_player[0].setSource(QUrl())
+            _shared_player[0].deleteLater()
+            _shared_player[0] = None
+        if _shared_sink[0]:
+            _shared_sink[0].deleteLater()
+            _shared_sink[0] = None
         sound.stop()
         sched.stop_countdown()
         tray.set_overlay_state(False)
@@ -179,6 +281,14 @@ def main() -> None:
             _hide_overlay()
         else:
             _show_overlay()
+
+    def _trigger_all_wipers() -> None:
+        """Trigger wiper sweep on all active overlays and restart video."""
+        for ov in overlays:
+            ov.trigger_wiper()
+        # Restart video from beginning on manual wiper trigger
+        if _shared_player[0]:
+            _shared_player[0].setPosition(0)
 
     # ------------------------------------------------------------------ #
     #  Helper functions (must be defined before signal wiring)
@@ -203,6 +313,14 @@ def main() -> None:
 
     def _quit() -> None:
         _hide_overlay()
+        # Force-destroy all overlay widgets so QMediaPlayer/D3D11 resources
+        # are released before the process exits (prevents D3D11 device leak
+        # that causes "Failed to create Direct3D device" on next launch)
+        for ov in overlays:
+            ov.deleteLater()
+        overlays.clear()
+        # Process pending deletions so Qt releases GPU resources now
+        app.processEvents()
         sched.stop_all()
         hotkey.stop()
         try:
