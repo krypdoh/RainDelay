@@ -6,6 +6,8 @@ Handles two independent scheduling mechanisms:
 2. Daily schedule   — emit `should_start` or `should_stop` when the wall clock
                       crosses the user-configured start / stop times (checked
                       every 30 seconds).
+3. Rain Break       — emit `break_due` every `break_minutes` (restarted by
+                      main.py after each break ends).
 
 All signals are safe to connect directly to UI / overlay slots.
 """
@@ -20,10 +22,17 @@ class Scheduler(QObject):
     should_start = pyqtSignal()    # daily schedule: time to show overlay
     should_stop  = pyqtSignal()    # daily schedule: time to hide overlay
     timeout      = pyqtSignal()    # countdown expired
+    break_due    = pyqtSignal()    # Rain Break interval elapsed
 
     def __init__(self, settings: dict, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._settings = settings
+        self._break_minutes = None
+
+        # Rain Break (single-shot; main.py restarts it after each break)
+        self._break_timer = QTimer(self)
+        self._break_timer.setSingleShot(True)
+        self._break_timer.timeout.connect(self.break_due)
 
         # Countdown (single-shot)
         self._countdown_timer = QTimer(self)
@@ -62,6 +71,22 @@ class Scheduler(QObject):
     def stop_all(self) -> None:
         self._countdown_timer.stop()
         self._schedule_timer.stop()
+        self._break_timer.stop()
+
+    def restart_break_timer(self) -> None:
+        """(Re)start the Rain Break interval if enabled."""
+        if self._settings.get("break_enabled", False):
+            minutes = max(1, int(self._settings.get("break_minutes", 60)))
+            self._break_minutes = minutes
+            self._break_timer.start(minutes * 60 * 1000)
+        else:
+            self._break_timer.stop()
+
+    def stop_break_timer(self) -> None:
+        self._break_timer.stop()
+
+    def break_remaining_ms(self) -> int:
+        return self._break_timer.remainingTime() if self._break_timer.isActive() else 0
 
     def countdown_remaining_ms(self) -> int:
         """Return milliseconds remaining on countdown, or 0 if not running."""
@@ -86,6 +111,14 @@ class Scheduler(QObject):
             self._check_schedule()   # evaluate immediately
         else:
             self._schedule_timer.stop()
+
+        # Rain Break: only restart if toggled or the interval changed
+        enabled = self._settings.get("break_enabled", False)
+        minutes = int(self._settings.get("break_minutes", 60))
+        if not enabled:
+            self._break_timer.stop()
+        elif not self._break_timer.isActive() or minutes != self._break_minutes:
+            self.restart_break_timer()
 
     def _check_schedule(self) -> None:
         now = datetime.now().time().replace(second=0, microsecond=0)

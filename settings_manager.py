@@ -36,6 +36,30 @@ DEFAULTS = {
     "lowres_mode": False,        # Render at 1080p then upscale (better performance on weak GPUs)
     "rain_opacity": 40,          # 0-100: how visible the rain overlay is (0=invisible, 100=full)
     "wiper_enabled": True,        # Enable windshield wiper animation on video loop / W key
+    # Hotkey / tray toggle target: "screensaver" or "active" (click-through)
+    "overlay_mode": "screensaver",
+    # Active (click-through) mode
+    "active_rain_opacity": 35,        # 0-100
+    "active_black_level": 15,         # 0-60: luminance cutoff that removes haze
+    "active_brightness": "normal",    # normal / bright / extra  (1x / 2x / 4x)
+    "active_tint": "#FFFFFF",
+    "active_sound_enabled": True,
+    "active_volume": 0.3,             # 0.0-1.0
+    "active_fps": 24,                 # 15 / 24 / 30
+    "active_hide_from_capture": True, # exclude from screen share / recording
+    "active_pause_fullscreen": True,
+    "active_fade": True,
+    "active_resume_on_startup": False,
+    "active_was_running": False,
+    # Lightning flashes (all modes)
+    "lightning_enabled": False,
+    # Rain Break: recurring timer that starts RainDelay automatically
+    "break_enabled": False,
+    "break_minutes": 60,              # time between breaks
+    "break_interactive": True,        # True: click-through rain; False: blur + lock until ESC / hotkey
+    "break_gradual": True,            # ramp rain opacity + volume up over time
+    "break_ramp_minutes": 10,         # time to reach full rain
+    "break_start_level": 10,          # 0-100: % of full rain at the start of a ramp
 }
 
 # Speed / frequency lookup tables used by rain_engine and overlay

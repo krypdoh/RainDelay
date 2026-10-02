@@ -12,7 +12,7 @@ RainDelay is a Windows-only full-screen rain overlay app (Python 3.11 + PyQt6). 
 | Only dependency | `PyQt6>=6.6.0` (see `requirements.txt`) |
 | Settings file | `%APPDATA%\RainDelay\settings.json` |
 | Log file | `%APPDATA%\RainDelay\raindelay.log` |
-| Version scheme | `YYYY.MM.DD.HHmm` (update in `main.py` header comment) |
+| Version | `1.1` (About dialog and the `main.py` header comment) |
 
 ## Running the App
 
@@ -39,6 +39,8 @@ Each module has a single responsibility. `main.py` owns all wiring.
 ```text
 main.py           → Entry point; constructs all components, wires Qt signals, enters event loop
 overlay.py        → RainOverlay(QWidget): full-screen window per monitor; video or rendered fallback
+active_overlay.py → Active (click-through) mode: ActiveFrameProcessor (luminance key → alpha), ActiveRainOverlay, FullscreenWatcher
+lightning.py      → Lightning(QObject): emits flash(level) every 30 s (random 5–15 s in storm mode)
 rain_engine.py    → Pure Python physics (no Qt); FALLING→BEAD→STREAK state machine
 tray_icon.py      → QSystemTrayIcon + context menu; emits signals to main.py
 control_panel.py  → 5-tab QDialog for settings; emits settings_saved(dict)
@@ -52,9 +54,13 @@ settings_manager.py → load()/save() for %APPDATA%\RainDelay\settings.json; DEF
 
 ```text
 hotkey.activated  ──┐
-tray.toggle_overlay ─┤──→ _toggle_overlay() → _show/_hide_overlay()
-                    ─┘
+tray.toggle_overlay ─┤──→ _toggle_overlay() → by settings["overlay_mode"]:
+                    ─┘     "screensaver" → _show/_hide_overlay(); "active" → _show/_hide_active()
+tray.mode_changed ────→ _set_mode(mode)  (switches live if running)
+watcher.fullscreen_monitor_changed → _on_fullscreen_changed() (suspend per-monitor + pause sound)
 sched.timeout ────────→ _hide_overlay()
+sched.break_due ──────→ _start_rain_break() (lockout → screensaver + focus guard; else active)
+lightning.flash ──────→ _on_flash() → ov.set_flash(level) on running overlays
 sched.should_start ───→ _show_overlay()
 tray.start_timed ─────→ _start_timed_break(minutes)
 tray.open_settings ───→ ControlPanel.exec()
@@ -79,7 +85,7 @@ overlay.dismiss ──────→ _hide_overlay()
 
 ### Qt Patterns
 
-- All UI work happens on the Qt main thread. `HotkeyManager` uses a daemon thread + queued signal to cross the thread boundary safely.
+- All UI work happens on the Qt main thread. `HotkeyManager` uses a daemon thread + queued signal to cross the thread boundary safely. Active-mode luminance keying runs on `ActiveFrameProcessor`'s worker thread; the GUI thread only installs the latest image.
 - `app.setQuitOnLastWindowClosed(False)` — the app stays alive via the tray icon.
 - Overlay windows use `Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool`.
 
@@ -89,6 +95,21 @@ overlay.dismiss ──────→ _hide_overlay()
 - Frames are pre-scaled in `_on_video_frame()` (not at paint time) to avoid per-frame upscaling costs.
 - If video resolution is lower than screen resolution, performance degrades badly (see [PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md)).
 - Video asset search order: `rain_native.*` → `rain.*` → `rain_lowres.*` (in `assets/`).
+
+### Active Mode (active_overlay.py)
+
+- Click-through via Qt `WindowTransparentForInput` + Win32 `WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW`; never takes focus, so no keyboard dismiss — hotkey/tray only.
+- No desktop capture. `QVideoFrame.toImage()` runs on the GUI thread (hardware frames crash if mapped elsewhere); luminance keying runs on a background thread and drops frames while a key is in flight. Keying: black-level cutoff via invert/Plus/invert, brightness via self-Plus, then `setAlphaChannel(grayscale)` on a tint fill. The image is shared by all screens. `ActiveRainOverlay.metric` reports DPR 1 so the layered backing store stays at logical resolution instead of the physical framebuffer.
+- Uses `show()` + `setGeometry()`, not `showFullScreen()`, so Windows doesn't treat it as a full-screen app.
+- `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` hides it from screen shares (Win10 2004+; failure is logged only).
+- Timers/schedule/tray breaks always use screensaver mode; active mode is stopped and resumed afterwards.
+
+### Rain Break (main.py + scheduler.py)
+
+- `Scheduler.break_due` fires every `break_minutes`; it is stopped during any screensaver session and restarted when a session/break ends (active ambient rain doesn't pause it).
+- `break_interactive` (default True) → break uses Active click-through rain; False → lockout. Breaks never use the wiper (`set_wiper_allowed(False)`).
+- Lockout = screensaver overlay + `set_lockout(True)` (ignores Alt+F4) + `_guard_lockout()` re-focusing via `overlay.force_foreground()` every 400 ms. Ctrl+Alt+Del / Win+L can't be blocked.
+- Gradual = `_intensity()` ramps `break_start_level` → 1.0 over `break_ramp_minutes`; overlays multiply their opacity by it (`set_intensity`) and sound volume is scaled. At full rain lightning switches to storm mode.
 
 ### Rain Physics (rain_engine.py)
 

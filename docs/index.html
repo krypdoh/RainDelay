@@ -53,7 +53,7 @@
         .container {
             position: relative;
             z-index: 1;
-            max-width: 900px;
+            max-width: 1040px;
             margin: 0 auto;
             padding: 80px 24px;
             text-align: center;
@@ -105,6 +105,7 @@
 
         .screenshot-wrapper {
             position: relative;
+            max-width: 900px;
             margin: 0 auto 60px;
             border-radius: 12px;
             overflow: hidden;
@@ -133,32 +134,210 @@
             pointer-events: none;
         }
 
+        .spotlight {
+            text-align: left;
+            max-width: 900px;
+            margin: 0 auto 28px;
+            padding: 32px 32px 28px;
+            background:
+                linear-gradient(180deg, rgba(72, 140, 210, 0.16), rgba(20, 24, 35, 0.75));
+            border-radius: 12px;
+            border: 1px solid rgba(127, 168, 255, 0.35);
+            box-shadow: 0 0 48px rgba(80, 130, 200, 0.12);
+        }
+
+        .spotlight-kicker {
+            font-size: 0.72rem;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: #7fa8ff;
+            margin-bottom: 10px;
+        }
+
+        .spotlight h2 {
+            font-size: clamp(1.6rem, 4vw, 2.2rem);
+            color: #e8eef6;
+            margin-bottom: 14px;
+        }
+
+        .spotlight p {
+            font-size: 0.95rem;
+            font-weight: 400;
+            color: #c8d4e6;
+            line-height: 1.65;
+            margin-bottom: 12px;
+        }
+
+        .spotlight p:last-child {
+            margin-bottom: 0;
+            color: #8ea0b8;
+            font-size: 0.85rem;
+        }
+
         .features {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 24px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
             margin-bottom: 60px;
             text-align: left;
+            perspective: 1100px;
         }
 
         .feature {
-            padding: 24px;
-            background: rgba(20, 24, 35, 0.6);
-            border-radius: 10px;
-            border: 1px solid rgba(100, 140, 200, 0.08);
+            --mx: 0;
+            --my: 0;
+            position: relative;
+            padding: 22px 22px 20px;
+            background: rgba(20, 24, 35, 0.72);
+            border-radius: 12px;
+            border: 1px solid rgba(100, 140, 200, 0.12);
+            cursor: pointer;
+            overflow: hidden;
+            opacity: 0;
+            translate: 0 18px;
+            animation: card-in 0.65s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+            animation-delay: calc(var(--i, 0) * 55ms);
+            transform: rotateX(calc(var(--my) * -7deg)) rotateY(calc(var(--mx) * 9deg));
+            transition:
+                border-color 0.25s ease,
+                box-shadow 0.25s ease,
+                background 0.25s ease;
+            outline: none;
+        }
+
+        .feature::before {
+            content: "";
+            position: absolute;
+            inset: -40% auto auto -30%;
+            width: 70%;
+            height: 180%;
+            background: linear-gradient(
+                100deg,
+                transparent 30%,
+                rgba(180, 210, 255, 0.16) 48%,
+                transparent 62%
+            );
+            transform: translateX(-120%) rotate(12deg);
+            transition: transform 0.7s ease;
+            pointer-events: none;
+        }
+
+        .feature::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 2px;
+            background: linear-gradient(90deg, #48c7ff, #7ea8ff 55%, #8f6dff);
+            transform: scaleX(0);
+            transform-origin: left center;
+            transition: transform 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+        }
+
+        .feature:hover,
+        .feature:focus-visible,
+        .feature.is-open {
+            border-color: rgba(127, 168, 255, 0.55);
+            background: rgba(28, 36, 54, 0.92);
+            box-shadow:
+                0 16px 40px rgba(0, 0, 0, 0.35),
+                0 0 32px rgba(80, 130, 210, 0.18);
+        }
+
+        .feature:hover::before,
+        .feature:focus-visible::before,
+        .feature.is-open::before {
+            transform: translateX(220%) rotate(12deg);
+        }
+
+        .feature:hover::after,
+        .feature:focus-visible::after,
+        .feature.is-open::after {
+            transform: scaleX(1);
+        }
+
+        .feature:focus-visible {
+            box-shadow:
+                0 0 0 2px #0a0a0f,
+                0 0 0 4px rgba(127, 168, 255, 0.8);
         }
 
         .feature h3 {
-            font-size: 1rem;
-            color: #a0b8d8;
+            font-size: 0.95rem;
+            color: #d5e4f6;
             margin-bottom: 8px;
+            transition: color 0.25s ease, translate 0.25s ease;
+        }
+
+        .feature:hover h3,
+        .feature:focus-visible h3,
+        .feature.is-open h3 {
+            color: #f2f7ff;
+            translate: 0 -1px;
         }
 
         .feature p {
             font-size: 0.8rem;
             font-weight: 400;
-            color: #4a5a70;
+            color: #8ea0b8;
             line-height: 1.6;
+        }
+
+        .feature .feature-more {
+            max-height: 0;
+            margin-top: 0;
+            padding-top: 0;
+            opacity: 0;
+            overflow: hidden;
+            color: #d7e6f8;
+            border-top: 1px solid transparent;
+            transition: max-height 0.35s ease, opacity 0.3s ease, margin-top 0.3s ease, padding-top 0.3s ease, border-color 0.3s ease;
+        }
+
+        .feature.is-open .feature-more {
+            max-height: 6em;
+            margin-top: 12px;
+            padding-top: 10px;
+            opacity: 1;
+            border-top-color: rgba(127, 168, 255, 0.28);
+        }
+
+        @keyframes card-in {
+            to {
+                opacity: 1;
+                translate: 0 0;
+            }
+        }
+
+        @media (max-width: 860px) {
+            .features {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 560px) {
+            .features {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .drop,
+            .feature,
+            .feature::before,
+            .feature::after,
+            .feature-more,
+            .feature h3 {
+                animation: none;
+                transition: none;
+            }
+
+            .feature {
+                opacity: 1;
+                translate: none;
+                transform: none;
+            }
         }
 
         .cta {
@@ -252,39 +431,75 @@
                    aria-label="RainDelay recording showing rain overlay on desktop"></video>
         </div>
 
+        <section class="spotlight" aria-labelledby="active-break-title">
+            <p class="spotlight-kicker">New in 1.1 · Active Break</p>
+            <h2 id="active-break-title">A real fake Rain Delay</h2>
+            <p>Active Break calls a rain delay on your workday. The rain is fake. The break is real — and it shows up on time, at an interval you choose, instead of whenever you happen to remember you needed one.</p>
+            <p>On that schedule the sky opens over the desktop. Rain and thunder build from a drizzle into a shower while clicks and typing pass straight through, so the pause can land mid-task without taking the keyboard. Look up. Breathe. Finish the sentence if you must. The delay was the point: a much-needed stop, delivered when you said it should arrive.</p>
+            <p>Turn it on in Settings → Rain Break. Pick how often it starts and how long the shower takes to reach full strength. Your hotkey sends the clouds away. Want the screen held until you are actually done? Turn off desktop interaction and the blur stays put.</p>
+        </section>
+
         <div class="features">
-            <div class="feature">
-                <h3>🌧️ Cinematic Rain</h3>
-                <p>Real rain video seamlessly layered over your blurred desktop. Adjustable intensity from gentle drizzle to downpour.</p>
-            </div>
-            <div class="feature">
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>☕ On Your Clock</h3>
+                <p>Active Break fires at the interval you set. Ten minutes or two hours — the delay arrives when you asked for it.</p>
+                <p class="feature-more">The timer waits out the break, then starts counting again. Ambient rain you leave on does not pause it.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>🌧️ Builds Like Weather</h3>
+                <p>Rain and sound ramp from a faint start to a full shower. At full strength, lightning switches to storm timing.</p>
+                <p class="feature-more">Set the starting level and how many minutes the build takes. The delay gets harder to ignore as it gathers.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>💧 Active Rain</h3>
+                <p>Leave a click-through shower on while you work. Switch from the tray Mode menu. Tune opacity, haze, brightness, and tint.</p>
+                <p class="feature-more">Hidden from screen sharing. It pauses on a monitor when a full-screen app is in front.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>⚡ Lightning</h3>
+                <p>Optional flashes in every mode. During an Active Break they come more often once the rain reaches full strength.</p>
+                <p class="feature-more">Quiet weather most of the time. A proper storm only after the delay has fully arrived.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>🎬 Cinematic Rain</h3>
+                <p>Real rain video layered over your blurred desktop. Intensity runs from a gentle drizzle to a downpour.</p>
+                <p class="feature-more">Black in the footage stays clear, so the storm sits on top of the room instead of covering it.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
                 <h3>🖥️ Every Screen</h3>
-                <p>Wraps all your monitors in one immersive rainstorm. Two screens, three — it just works.</p>
-            </div>
-            <div class="feature">
+                <p>Wraps the monitors you choose in one rainstorm. Two screens, three — the delay covers the desk.</p>
+                <p class="feature-more">All screens, or a list of them. Each monitor gets its own overlay.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
                 <h3>🎵 Ambient Sound</h3>
-                <p>Rain and distant thunder fade in around you. Close your eyes and you're somewhere else.</p>
-            </div>
-            <div class="feature">
+                <p>Rain and distant thunder fade in around the delay. Close your eyes and the office is somewhere else.</p>
+                <p class="feature-more">Volume follows the ramp, so the room gets louder as the shower builds.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
                 <h3>🚗 Windshield Wiper</h3>
-                <p>A smooth animated wiper sweeps across the screen at every video loop — or press W anytime.</p>
-            </div>
-            <div class="feature">
-                <h3>⏱️ Smart Timers</h3>
-                <p>Set a countdown for your break or schedule daily rain sessions. It handles itself.</p>
-            </div>
-            <div class="feature">
+                <p>A smooth wiper sweeps the screensaver at every video loop — or press W anytime.</p>
+                <p class="feature-more">Breaks leave the wiper parked. The delay is for looking up, not clearing the glass.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>⏱️ Also on a Schedule</h3>
+                <p>A countdown for a single sitting, or a daily window when the rain is allowed to start.</p>
+                <p class="feature-more">Those sessions still use the full screensaver. Active Break is the one that keeps the desktop live.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
                 <h3>🎨 Fully Tunable</h3>
-                <p>Blur, darkness, rain opacity, wiper — dial every detail to match your mood.</p>
-            </div>
-            <div class="feature">
-                <h3>⚡ Instant On</h3>
-                <p>One hotkey and you're in the rain in under 100ms. Press ESC to return instantly.</p>
-            </div>
-            <div class="feature">
+                <p>Blur, darkness, rain opacity, tint, and wiper. Dial the storm until it matches the room.</p>
+                <p class="feature-more">Active rain has its own opacity, haze, brightness, and color, separate from the screensaver.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
+                <h3>⌨️ One Hotkey</h3>
+                <p>Summon the rain, or end an Active Break, with the shortcut you set. Screensaver mode dismisses with ESC.</p>
+                <p class="feature-more">The combo is global. No window has to be in front for the delay to start or stop.</p>
+            </article>
+            <article class="feature" tabindex="0" aria-expanded="false">
                 <h3>🌈 Living Clock</h3>
-                <p>Click to reveal a color-cycling clock that smoothly shifts through the rainbow while you relax.</p>
-            </div>
+                <p>Click to reveal a color-cycling clock that shifts through the rainbow while you sit out the delay.</p>
+                <p class="feature-more">A quiet reminder of how long you have actually been still.</p>
+            </article>
         </div>
 
         <div class="links-row">
@@ -293,13 +508,12 @@
         </div>
 
         <footer>
-            <div>Built with Python &amp; PyQt6</div>
+            <div>Version 1.1 · Built with Python &amp; PyQt6</div>
             <div class="footer-author">Copyright 2026 - Paul R. Charovkine</div>
         </footer>
     </div>
 
     <script>
-        // Generate rain drops
         const rain = document.getElementById('rain');
         const count = 80;
         for (let i = 0; i < count; i++) {
@@ -312,6 +526,45 @@
             drop.style.height = (50 + Math.random() * 60) + 'px';
             rain.appendChild(drop);
         }
+
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const cards = document.querySelectorAll('.feature');
+
+        function setOpen(card, open) {
+            card.classList.toggle('is-open', open);
+            card.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+
+        cards.forEach((card, index) => {
+            card.style.setProperty('--i', index);
+
+            card.addEventListener('click', () => {
+                const willOpen = !card.classList.contains('is-open');
+                cards.forEach((other) => setOpen(other, false));
+                setOpen(card, willOpen);
+            });
+
+            card.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                card.click();
+            });
+
+            if (reduceMotion) return;
+
+            card.addEventListener('pointermove', (event) => {
+                const rect = card.getBoundingClientRect();
+                const x = (event.clientX - rect.left) / rect.width - 0.5;
+                const y = (event.clientY - rect.top) / rect.height - 0.5;
+                card.style.setProperty('--mx', x.toFixed(3));
+                card.style.setProperty('--my', y.toFixed(3));
+            });
+
+            card.addEventListener('pointerleave', () => {
+                card.style.setProperty('--mx', '0');
+                card.style.setProperty('--my', '0');
+            });
+        });
     </script>
 </body>
 </html>

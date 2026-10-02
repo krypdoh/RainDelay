@@ -4,6 +4,7 @@ System-tray icon and context menu for RainDelay.
 
 Layout (inspired by RainBreak):
   • Start / Stop RainDelay
+  • Mode ▸ Screensaver / Active (click-through)
   ─────────
   • 1 Min Break
   • 2 Min Break
@@ -24,7 +25,7 @@ Layout (inspired by RainBreak):
 from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QApplication, QInputDialog,
 )
-from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPainterPath
+from PyQt6.QtGui import QIcon, QAction, QActionGroup, QPixmap, QPainter, QColor, QPainterPath
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QPointF
 
 import settings_manager as sm
@@ -37,6 +38,7 @@ class TrayIcon(QObject):
     start_timed    = pyqtSignal(int)   # emits minutes for a timed break
     open_settings  = pyqtSignal()
     quit_app       = pyqtSignal()
+    mode_changed   = pyqtSignal(str)   # "screensaver" or "active"
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -44,6 +46,7 @@ class TrayIcon(QObject):
 
         # Load custom break times from settings, or use defaults
         settings = sm.load()
+        self._mode: str = settings.get("overlay_mode", "screensaver")
         self._break_minutes: list[int] = settings.get(
             "break_presets", DEFAULT_BREAK_MINUTES[:]
         )
@@ -73,6 +76,20 @@ class TrayIcon(QObject):
         self._toggle_action = QAction("Start RainDelay", menu)
         self._toggle_action.triggered.connect(self.toggle_overlay)
         menu.addAction(self._toggle_action)
+
+        # --- Mode ---
+        mode_menu = menu.addMenu("Mode")
+        group = QActionGroup(mode_menu)
+        group.setExclusive(True)
+        self._mode_actions: dict[str, QAction] = {}
+        for key, label in (("screensaver", "Screensaver"),
+                           ("active", "Active (click-through)")):
+            act = QAction(label, mode_menu, checkable=True)
+            act.setChecked(key == self._mode)
+            act.triggered.connect(lambda checked, k=key: self._on_mode_picked(k))
+            group.addAction(act)
+            mode_menu.addAction(act)
+            self._mode_actions[key] = act
 
         menu.addSeparator()
 
@@ -117,6 +134,12 @@ class TrayIcon(QObject):
         self._overlay_active = active
         self._sync_toggle_text()
 
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
+        if mode in self._mode_actions:
+            self._mode_actions[mode].setChecked(True)
+        self._sync_toggle_text()
+
     def show_notification(self, title: str, message: str) -> None:
         self._tray.showMessage(title, message,
                                QSystemTrayIcon.MessageIcon.Information, 3000)
@@ -126,12 +149,19 @@ class TrayIcon(QObject):
     # ------------------------------------------------------------------ #
 
     def _sync_toggle_text(self):
+        suffix = " (Active)" if self._mode == "active" else ""
         if self._overlay_active:
-            self._toggle_action.setText("Stop RainDelay")
-            self._tray.setToolTip("RainDelay  [ACTIVE]")
+            self._toggle_action.setText(f"Stop RainDelay{suffix}")
+            self._tray.setToolTip(f"RainDelay  [ACTIVE]{suffix}")
         else:
-            self._toggle_action.setText("Start RainDelay")
+            self._toggle_action.setText(f"Start RainDelay{suffix}")
             self._tray.setToolTip("RainDelay")
+
+    def _on_mode_picked(self, mode: str) -> None:
+        if mode != self._mode:
+            self._mode = mode
+            self._sync_toggle_text()
+            self.mode_changed.emit(mode)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -169,7 +199,7 @@ class TrayIcon(QObject):
         msg.setWindowTitle("About RainDelay")
         msg.setText(
             "<b>RainDelay</b><br>"
-            "Version 1.0<br>"
+            "Version 1.1<br>"
             "Paul R. Charovkine - 2026<br><br>"
             "A desktop rain overlay for taking mindful breaks.<br>"
             "Hotkey: <b>Ctrl+Alt+R</b> (configurable)<br><br>"

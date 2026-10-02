@@ -4,8 +4,27 @@ RainDelay PyInstaller spec file.
 Excludes unused Qt modules and other heavy libraries to minimize exe size.
 
 Build with:
-    pyinstaller RainDelay.spec --clean
+    ./build.ps1          (or: pyinstaller RainDelay.spec --clean)
+Output: dist/RainDelay.exe (single file)
 """
+
+import os
+
+# Backups, OneDrive "_1" conflict copies and tools must not bloat the one-file exe.
+_ASSET_SKIP_DIRS = {'backupvids'}
+_ASSET_SKIP_EXTS = {'.bak', '.exe', '.py', '.ini'}
+
+
+def _asset_datas():
+    datas = []
+    for root, dirs, files in os.walk('assets'):
+        dirs[:] = [d for d in dirs if d not in _ASSET_SKIP_DIRS]
+        for f in files:
+            stem, ext = os.path.splitext(f)
+            if ext.lower() in _ASSET_SKIP_EXTS or stem.endswith('_1'):
+                continue
+            datas.append((os.path.join(root, f), root))
+    return datas
 
 # Modules we actually use:
 #   PyQt6.QtWidgets, QtCore, QtGui, QtMultimedia
@@ -101,7 +120,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('sounds', 'sounds')],
+    datas=_asset_datas() + [('sounds', 'sounds')],
     hiddenimports=['PyQt6.QtMultimedia'],
     hookspath=[],
     hooksconfig={},

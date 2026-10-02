@@ -43,6 +43,28 @@ _ASSETS = _HERE / "assets"
 _VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm")
 
 
+def force_foreground(hwnd: int) -> None:
+    """Take focus from another process (Windows blocks plain SetForegroundWindow)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.GetForegroundWindow.restype = wintypes.HWND
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+        fg = u.GetForegroundWindow()
+        fg_tid = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        me = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = bool(fg_tid and fg_tid != me and u.AttachThreadInput(me, fg_tid, True))
+        u.BringWindowToTop(wintypes.HWND(hwnd))
+        u.SetForegroundWindow(wintypes.HWND(hwnd))
+        if attached:
+            u.AttachThreadInput(me, fg_tid, False)
+    except Exception as e:
+        log.debug("force_foreground failed: %s", e)
+
+
 class _CustomGraphicsView(QGraphicsView):
     """Custom QGraphicsView that paints background and text overlay."""
     
@@ -77,7 +99,7 @@ class _CustomGraphicsView(QGraphicsView):
         if px and not px.isNull():
             scene_rect = self.scene().sceneRect()
             rain_opacity = overlay._settings.get("rain_opacity", 40) / 100.0
-            painter.setOpacity(rain_opacity)
+            painter.setOpacity(rain_opacity * overlay._intensity)
             painter.drawPixmap(scene_rect.toRect(), px)
             painter.setOpacity(1.0)
     
@@ -95,6 +117,8 @@ class _CustomGraphicsView(QGraphicsView):
             self._parent_overlay._paint_text_overlay(painter, w, h)
         if overlay._exit_hint_visible:
             self._parent_overlay._paint_exit_hint(painter, w, h)
+        if overlay._flash_level > 0:
+            painter.fillRect(rect, QColor(255, 255, 255, int(235 * overlay._flash_level)))
 
         # Performance tracking for video mode
         now = time.perf_counter()
@@ -203,6 +227,10 @@ class RainOverlay(QWidget):
         self._show_text = False
         self._exit_hint_visible = False
         self._countdown_remaining_ms = 0  # set externally by main.py
+        self._intensity = 1.0     # rain opacity multiplier (Rain Break ramp)
+        self._flash_level = 0.0   # lightning white level 0..1
+        self._lockout = False     # Rain Break lockout: ignore window close
+        self._wiper_allowed = True  # False during Rain Breaks
         self._exit_hint_timer = QTimer(self)
         self._exit_hint_timer.setSingleShot(True)
         self._exit_hint_timer.setInterval(3000)
@@ -339,6 +367,26 @@ class RainOverlay(QWidget):
     def set_countdown_remaining(self, ms: int):
         """Called by main.py to update the countdown remaining time."""
         self._countdown_remaining_ms = ms
+
+    def set_intensity(self, level: float):
+        self._intensity = max(0.0, min(1.0, level))
+        self._request_repaint()
+
+    def set_flash(self, level: float):
+        self._flash_level = level
+        self._request_repaint()
+
+    def set_lockout(self, on: bool):
+        self._lockout = on
+
+    def set_wiper_allowed(self, on: bool):
+        self._wiper_allowed = on
+
+    def closeEvent(self, event):
+        if self._lockout:
+            event.ignore()  # block Alt+F4 during a Rain Break lockout
+            return
+        super().closeEvent(event)
 
     # ================================================================== #
     #  Video widget setup (receives frames from shared player in main.py)
@@ -518,7 +566,7 @@ class RainOverlay(QWidget):
 
     def _start_wiper_sweep(self) -> None:
         """Trigger a single left-to-right wiper sweep animation."""
-        if not self._wiper_pixmap or self._wiper_active:
+        if not self._wiper_allowed or not self._wiper_pixmap or self._wiper_active:
             return
         log.debug("Wiper sweep triggered")
         self._wiper_active = True
